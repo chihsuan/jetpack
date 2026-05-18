@@ -22,9 +22,9 @@ the persistent workpad comment header.
 # Toolchain (resolve before any validation command)
 
 This repo pins **Node `^24.14.0`** (`.nvmrc`, `package.json#engines.node`) and **pnpm
-`^10.28.2`**. Symphony spawns you in a non-interactive shell, so the operator's
-`~/.zshrc` (PATH exports, version-manager shims, aliases) is **not** loaded — only
-env vars from `.zshenv` survive. Before running `pnpm` / `pnpm jetpack`, verify:
+`^10.28.2`**. Symphony spawns you in a non-interactive shell, so PATH exports and
+version-manager shims defined in `~/.zshrc` are **not** loaded — only env vars from
+`.zshenv` survive. Before running `pnpm` / `pnpm jetpack`, verify:
 
 ```bash
 node --version   # expect v24.14.x or newer 24.x
@@ -47,13 +47,6 @@ Try these in order and record which one worked in the workpad `### Notes` as
 Do **not** `brew install` (Homebrew writes outside the sandbox and will fail) and
 do **not** edit `~/.zshrc`, `~/.zshenv`, or any other dotfile. The fix is per-run,
 not persistent.
-
-# Jetpack CLI invocation
-
-Repo `AGENTS.md` documents a `jp` shorthand. That's a zsh **alias** in the
-operator's `~/.zshrc` and does not exist in your shell. Always invoke the CLI as
-`pnpm jetpack <subcommand>` — same code, resolves through the worktree's
-`node_modules/.bin`, no PATH or alias dependency.
 
 # Phase 0 — Identify the target package
 
