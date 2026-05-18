@@ -54,53 +54,30 @@ persistent workpad comment header.
 
 # Toolchain (use the sticky shim)
 
-This repo pins **Node `^24.14.0`** (`.nvmrc`, `package.json#engines.node`) and **pnpm
-`^10.28.2`**. Symphony spawns you in a non-interactive shell, so PATH exports and
-version-manager shims defined in `~/.zshrc` are **not** loaded — only env vars from
-`.zshenv` survive.
+This repo pins specific Node and pnpm versions (see `.nvmrc`,
+`package.json#engines.node`, and `package.json#packageManager`). Symphony spawns
+you in a non-interactive shell, so PATH exports and version-manager shims
+defined in `~/.zshrc` are **not** loaded — only env vars from `.zshenv` survive.
 
-The `after_create` hook already resolves Node 24 once (via nvm/fnm/mise, in that
-order) and writes the resolved bin dir to `.symphony-env.sh` at the worktree
-root. **Prepend `. .symphony-env.sh &&` to every shell command that needs Node
-or pnpm.** That keeps each invocation a single short line:
+The `after_create` hook resolves Node once (via nvm/fnm/mise, in that order)
+and writes the resolved bin dir to `.symphony-env.sh` at the worktree root.
+**Prepend `. .symphony-env.sh &&` to every shell command that needs Node or
+pnpm.** That keeps each invocation a single short line:
 
 ```bash
 . .symphony-env.sh && pnpm jetpack build packages/<pkg>
 . .symphony-env.sh && git commit -m "..."   # husky pre-commit needs Node in PATH
 ```
 
-Do **not** re-source `nvm` / `fnm` / `mise` inline on every command — that's the
-bootstrap the hook already paid for. Verify once, near the start of the run:
+Verify once near the start of the run:
 
 ```bash
-. .symphony-env.sh && node --version   # expect v24.14.x or newer 24.x
-. .symphony-env.sh && pnpm --version   # expect 10.28.x or newer 10.x
+. .symphony-env.sh && node --version   # must match .nvmrc
+. .symphony-env.sh && pnpm --version   # must satisfy package.json#packageManager
 ```
 
-If `.symphony-env.sh` is missing or the version is wrong, the hook failed and you
-need to fall back. Resolve Node without mutating the developer environment, then
-write the resolved bin dir to `.symphony-env.sh` yourself so the rest of the run
-benefits. Try in this order and record which worked in the workpad `### Notes`
-as `Toolchain: <method> → node v<version>`:
-
-1. **nvm**: `\. "$NVM_DIR/nvm.sh" && nvm use` (reads `.nvmrc`).
-2. **fnm**: `eval "$(fnm env --use-on-cd)" && fnm use`.
-3. **mise**: `mise use -g node@24 && eval "$(mise activate bash)"`.
-4. **asdf**: `asdf install nodejs 24.14.0 && asdf shell nodejs 24.14.0`.
-5. **Fallback** (none of the above available, or all blocked by the sandbox):
-   download the Node 24 tarball into `/private/tmp/symphony-node24/` (writable
-   under `workspaceWrite`), extract, and `export PATH=/private/tmp/symphony-node24/bin:$PATH`
-   for the run.
-
-After whichever method works, persist it for the rest of the run:
-
-```bash
-printf 'export PATH=%q:"$PATH"\n' "$(dirname "$(command -v node)")" > .symphony-env.sh
-```
-
-Do **not** `brew install` (Homebrew writes outside the sandbox and will fail) and
-do **not** edit `~/.zshrc`, `~/.zshenv`, or any other dotfile. The fix is per-run,
-not persistent.
+If `.symphony-env.sh` is missing or `node --version` doesn't match `.nvmrc`,
+follow `.agents/skills/symphony-toolchain-fallback.md`.
 
 # GitHub access (prefer scoped tools)
 
@@ -147,8 +124,7 @@ drift even after the `after_create` hook sets it.
 # Step 0 — Determine ticket state and route
 
 Fetch the issue, read its state, and route. There is no `land` skill in this
-fork (PR merges are operator-driven, see `RUNBOOK.md` "PR review iteration"),
-so terminal states do nothing.
+fork — PR merges are operator-driven, so terminal states do nothing.
 
 | State         | Action                                                                                                  |
 | ------------- | ------------------------------------------------------------------------------------------------------- |
@@ -156,7 +132,7 @@ so terminal states do nothing.
 | `Todo`        | Move to `In Progress`, bootstrap workpad, then run Phase 0 → execution.                                 |
 | `In Progress` | Reuse existing workpad, reconcile checklist, continue execution.                                        |
 | `In Review`   | Do **not** code or edit issue content. Poll PR for updates; on Rework feedback, move issue to `Rework`. |
-| `Rework`      | Run the **Rework flow** below — full reset, not incremental patching.                                   |
+| `Rework`      | Follow `.agents/skills/symphony-rework.md` — full reset, not incremental patching.                      |
 | `Merging`     | Operator handles merge manually. Do nothing.                                                            |
 | `Done`        | Do nothing. Shut down.                                                                                  |
 
@@ -239,7 +215,7 @@ Follow `.agents/skills/work-on.md` end-to-end with these substitutions for
 unattended orchestration:
 
 - **Skip Phase 2 "wait for user approval"** — Symphony's `quality_gate` is not
-  enabled (see `RUNBOOK.md`), but the workpad plan still serves as the visible
+  enabled in this harness, but the workpad plan still serves as the visible
   alignment artifact. Update it, then proceed.
 - **Replace Phase 3 (`pnpm jetpack docker` bring-up + port allocation) with
   `.agents/skills/jetpack-test-jurassic-ninja.md` in `provision-only` flow** for
@@ -310,8 +286,11 @@ git diff --name-only origin/trunk...HEAD
 ```
 
 Every path must be under `projects/packages/<pkg>/**` or be `pnpm-lock.yaml`.
-If the issue genuinely requires cross-package work, stop and follow the
-**clarification escape hatch** — do not silently expand scope.
+If the ticket's acceptance criteria require changes outside that scope —
+in either direction (expansion _or_ needing to touch e.g. `tools/`,
+`.github/`, a sibling package) — stop in Phase 0 and follow the
+**clarification escape hatch** so the operator can decide whether to widen
+scope, split the ticket, or accept a partial.
 
 # Dependency-change guardrail
 
@@ -336,63 +315,21 @@ same project as the current issue, link the current issue as `related`, and
 use `blockedBy` if the follow-up depends on the current change. Record the
 new issue ID in the current workpad's `### Notes`.
 
-# PR feedback sweep protocol (required when a PR is attached)
+# PR feedback handling
 
-Two activation paths:
+On `In Review`, Symphony's `pr_review_poller` re-activates the agent with the
+feedback already gathered and embedded in the continuation prompt — treat
+that as the primary source. On `Rework` re-entry, on `Todo` with an attached
+PR, and as the final pre-handoff check before moving to `In Review`, run the
+manual sweep in `.agents/skills/symphony-pr-feedback-sweep.md`.
 
-- **Re-entry via Symphony's `pr_review_poller`** — when an `In Review` issue
-  receives reviewer activity, the poller re-activates the agent with the
-  feedback already gathered and embedded in the continuation prompt. Treat
-  the injected context as the primary feedback source; you usually do **not**
-  need to re-fetch.
-- **Manual sweep** — required on every re-entry from `Rework` or from
-  `Todo`-with-attached-PR, and as a final pre-handoff check before moving the
-  issue to `In Review`.
+# CI failure handling
 
-Manual sweep steps:
-
-1. Identify the PR number via `github_get_pull_request` (returns the PR
-   currently attached to the branch).
-2. Gather feedback from **all** channels (no scoped tool covers comment
-   listing, so this is raw `gh`):
-   - Top-level PR comments: `gh pr view <pr> --repo chihsuan/jetpack --comments`
-   - Inline review comments: `gh api repos/chihsuan/jetpack/pulls/<pr>/comments`
-   - Review summaries/states: `gh pr view <pr> --repo chihsuan/jetpack --json reviews`
-3. Treat every actionable comment (human or bot, top-level or inline) as
-   **blocking** until one of:
-   - the code/test/docs change addresses it, or
-   - an explicit, justified pushback reply is posted on the same thread via
-     `github_add_pr_comment` (top-level) or, for inline-thread replies that the
-     scoped tool can't post, `gh api repos/chihsuan/jetpack/pulls/<pr>/comments/<id>/replies`.
-4. Mirror each feedback item into the workpad checklist with resolution status.
-5. Re-run validation after feedback-driven changes; re-run the sweep until no
-   actionable comments remain.
-
-# CI failure triage protocol (required when checks are red)
-
-Two activation paths, mirroring the feedback sweep:
-
-- **Re-entry via Symphony's `ci_poller`** — on `In Review` issues, the poller
-  watches GitHub Actions and re-activates the agent with the failure summary
-  embedded in the continuation prompt.
-- **Manual check** — before moving to `In Review`, and after any push you
-  initiated locally.
-
-Manual check steps:
-
-1. Read CI status: `github_get_pr_checks` (returns per-check status / conclusion
-   / `details_url`). Use this in preference to `gh pr checks`.
-2. For each failing check, fetch the failed log content (no scoped equivalent):
-   `gh run view <run-id> --repo chihsuan/jetpack --log-failed`
-   (the run ID is in the `details_url` returned by `github_get_pr_checks`).
-3. Categorize: flaky infrastructure (retryable) vs real code defect.
-4. For real failures: diagnose root cause, fix it, re-run validation locally,
-   then loop back through validation → diff review → commit → push.
-5. **Never** use `--no-verify`, `--force`, or skipped hooks to bypass the
-   failure.
-6. If the failure is in unrelated pre-existing code (rare, given the scope
-   constraint): document in the workpad and note it explicitly in the PR body
-   so the reviewer knows it's not yours.
+On `In Review`, Symphony's `ci_poller` re-activates the agent with the
+failure summary embedded in the continuation prompt. Before moving to
+`In Review`, and after any push you initiated locally, check with
+`github_get_pr_checks`; if anything is red, follow
+`.agents/skills/symphony-ci-triage.md`.
 
 # Blocked-access escape hatch
 
@@ -436,38 +373,16 @@ When invoking:
 
 # Commit prerequisites (husky pre-commit hooks)
 
-`git commit` runs husky pre-commit hooks (`npx eslint`, etc.). Two things go
-wrong if you don't set up first — and both have already burned multiple turns
-in previous Symphony runs:
+`git commit` runs husky pre-commit hooks. Source `.symphony-env.sh` for the
+commit shell the same way you do for any other command so `npx` is on PATH:
 
-1. **Node must be in `PATH` for the commit shell.** Source `.symphony-env.sh`
-   for the commit just like every other command:
+```bash
+. .symphony-env.sh && git add <paths> && git commit -m "<subject>"
+```
 
-   ```bash
-   . .symphony-env.sh && git add <paths> && git commit -m "<subject>"
-   ```
-
-   Without it, the hook errors out with "command not found: npx" and the
-   commit silently doesn't happen.
-
-2. **Stale workspace `dist/` confuses ESLint disable directives.** If a
-   workspace dep (e.g. `projects/js-packages/charts`) has a leftover `dist/`
-   tree from an earlier build, `import/no-unresolved` will succeed against
-   the dist artifact, which then makes an
-   `eslint-disable-next-line import/no-unresolved` directive look "unused"
-   and fail with `--max-warnings=0`. If you see "unused disable directive"
-   on an import you didn't touch, the fix is **not** to remove the
-   directive — the fix is to clear stale dist trees:
-
-   ```bash
-   rm -rf projects/js-packages/<dep>/dist
-   . .symphony-env.sh && npx eslint --flag v10_config_lookup_from_file \
-     --max-warnings=0 <changed files>
-   ```
-
-   Only after that should you `git commit` again.
-
-Do not use `--no-verify` to bypass the hook. The fix is always to satisfy it.
+If the commit fails with `command not found: npx` or eslint emits
+`unused disable directive` on imports you didn't touch, follow
+`.agents/skills/symphony-husky-recovery.md`.
 
 # Fork-only push and PR (do not skip)
 
@@ -498,9 +413,47 @@ layer 2; layer 1 is preferred only when you don't need the skill's extras.
 - No "Co-Authored-By" or AI/Claude mentions in commit messages.
 - PR description: use Linear issue ID (e.g. `UNI-438`), not full URL.
 - Never include internal P2/WordPress.com URLs in the public PR description.
-- PR body must include **What changed and why**, **Testing evidence** with
-  commands and output snippets, **Screenshots/recordings** for UI changes, and
-  any **Follow-ups** filed via the out-of-scope policy above.
+- Fill the Jetpack PR template (`.github/PULL_REQUEST_TEMPLATE.md`) — read
+  the file before composing the body. Sections in order: `Fixes <ID>`,
+  `## Proposed changes`, `## Related product discussion/links`,
+  `## Does this pull request change what data or activity we track or use?`,
+  `## Testing instructions`.
+
+## Write `## Testing instructions` for a fresh-checkout reviewer
+
+Assume the reviewer has a clean Jetpack clone and a local WordPress install,
+with `<pkg>` active. Give them one or two bullets: an admin path to visit
+and the user-visible result the PR produces. Cover behavior, not internals.
+
+```md
+## Testing instructions
+
+- Visit `/wp-admin/admin.php?page=jetpack-<pkg>`.
+  - Expected: <user-visible behavior the PR adds/changes>.
+  - Expected: <second observable check if relevant, e.g. tooltip/interaction>.
+```
+
+Keep local build/test/lint runs and their exit codes in the workpad
+`### Validation` — CI re-runs them on every push, so the PR body doesn't
+need to.
+
+## Screenshots
+
+Capture before/after under `.work-on/screenshots/` and attach them to the
+Linear issue for the operator's record:
+
+```
+linear_attach_file(local_path: ".work-on/screenshots/<name>.png", title: "<short label>")
+```
+
+Describe the visual change in `## Testing instructions` as expected
+behavior.
+
+## Follow-ups
+
+Out-of-scope work goes in a separate Backlog issue per **Out-of-scope
+improvements** above. Reference the new issue ID in a `## Notes` section at
+the bottom of the PR body so reviewers see what was deferred.
 
 # Self-review pause (do not skip)
 
@@ -529,10 +482,15 @@ move the issue to `In Review`:
       declares a `phpunit` script. Otherwise note `composer phpunit: n/a` in
       the workpad — do not run it speculatively.
 - [ ] `pnpm changelog` entry exists under `projects/packages/<pkg>/changelog/`.
-- [ ] If visual: before/after screenshots under `.work-on/screenshots/`.
+- [ ] If visual: before/after screenshots captured under
+      `.work-on/screenshots/` and attached to the Linear issue via
+      `linear_attach_file`.
 - [ ] PR is open against `chihsuan/jetpack:trunk` with conventional-commit
       title, Linear ID in body, and full body sections.
       Verify via `github_get_pull_request` (returns `headRefName`/`baseRefName`).
+- [ ] PR body `## Testing instructions` reads as fresh-checkout reviewer
+      steps (admin path + expected user-visible result); local build/test/lint
+      runs stay in the workpad `### Validation`.
 - [ ] `github_get_pr_checks` shows all checks green (or red items triaged
       per the CI protocol).
 - [ ] PR feedback sweep has no outstanding actionable items.
@@ -540,27 +498,6 @@ move the issue to `In Review`:
 After moving to `In Review`, **end the turn**. Do not continue ordinary
 implementation work unless Symphony injects reviewer, CI, self-review, or
 operator rework context.
-
-# Rework flow
-
-`Rework` is a **full approach reset**, not incremental patching.
-
-1. Re-read the issue body and all human/reviewer comments end to end.
-   Explicitly note in the workpad what will be done differently this attempt.
-2. Post a short pointer on the existing PR via `github_add_pr_comment` (e.g.
-   "Closing in favor of fresh approach — see new PR linked from the Linear
-   issue."), then close it with
-   `gh pr close <pr> --repo chihsuan/jetpack` (no scoped equivalent for close).
-3. Remove the existing workpad comment (`{{ agent.workpad_heading }}`,
-   `## Codex Workpad`, or `## Claude Workpad`).
-4. The Symphony workspace already gives you a fresh worktree on `change/<slug>`
-   off `origin/trunk`; verify with `git status` and `git log origin/trunk..HEAD`.
-   If for any reason it isn't clean, stop and report via the blocked-access
-   hatch — do not try to manually rebase.
-5. Restart from the normal kickoff flow:
-   - Move issue from `Rework` to `In Progress`.
-   - Create a new `{{ agent.workpad_heading }}` workpad.
-   - Run Phase 0 → Step 1 → Step 2 → /work-on → ... → completion bar.
 
 # Workpad template
 
@@ -613,6 +550,11 @@ updated in place throughout execution:
 - `.agents/skills/jetpack-changelog.md` — required changelog entry per the DoD.
 - `.agents/skills/jetpack-pr.md` — opens the PR; pair with the `--repo`/`--base` overrides above.
 - `.agents/skills/jetpack-screenshot.md` — used by /work-on Phases 4 and 7.
+- `.agents/skills/symphony-toolchain-fallback.md` — fallback when `.symphony-env.sh` is missing or `node --version` doesn't match `.nvmrc`.
+- `.agents/skills/symphony-husky-recovery.md` — recover from `command not found: npx` and stale-`dist/` eslint failures.
+- `.agents/skills/symphony-pr-feedback-sweep.md` — manual PR feedback gather (fallback to `pr_review_poller`).
+- `.agents/skills/symphony-ci-triage.md` — manual triage for red GitHub Actions checks.
+- `.agents/skills/symphony-rework.md` — full reset flow when an issue moves to `Rework`.
 
 # Issue context
 
