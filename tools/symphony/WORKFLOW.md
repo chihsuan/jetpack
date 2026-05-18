@@ -1,6 +1,24 @@
 ---
 hooks:
   after_create: |
+    # Sticky toolchain shim: resolve Node 24 once via whichever version manager
+    # the operator has installed, then pin the resolved bin dir into
+    # `.symphony-env.sh` so the agent doesn't have to repeat the nvm/fnm/mise
+    # bootstrap on every turn. Agent should `. .symphony-env.sh` as the first
+    # command of each turn that needs Node/pnpm.
+    {
+      if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+        . "${NVM_DIR:-$HOME/.nvm}/nvm.sh" && nvm use >/dev/null 2>&1 || true
+      elif command -v fnm >/dev/null 2>&1; then
+        eval "$(fnm env)" && fnm use >/dev/null 2>&1 || true
+      elif command -v mise >/dev/null 2>&1; then
+        eval "$(mise activate bash --shims)" 2>/dev/null || true
+      fi
+      NODE_BIN_DIR="$(command -v node >/dev/null 2>&1 && dirname "$(command -v node)" || true)"
+      if [ -n "$NODE_BIN_DIR" ] && [ -d "$NODE_BIN_DIR" ]; then
+        printf 'export PATH=%q:"$PATH"\n' "$NODE_BIN_DIR" > .symphony-env.sh
+      fi
+    } 2>/dev/null || true
     pnpm install --frozen-lockfile || pnpm install
     # Fork-only push enforcement: stronger than a pre-push hook because it
     # cannot be bypassed with `git push --no-verify` and survives `pnpm install`
@@ -34,21 +52,36 @@ persistent workpad comment header.
 - Never use `--no-verify`, `--force` (to main), `--no-gpg-sign`, or any flag that
   bypasses hooks/signing/checks. Diagnose and fix the underlying issue instead.
 
-# Toolchain (resolve before any validation command)
+# Toolchain (use the sticky shim)
 
 This repo pins **Node `^24.14.0`** (`.nvmrc`, `package.json#engines.node`) and **pnpm
 `^10.28.2`**. Symphony spawns you in a non-interactive shell, so PATH exports and
 version-manager shims defined in `~/.zshrc` are **not** loaded — only env vars from
-`.zshenv` survive. Before running `pnpm` / `pnpm jetpack`, verify:
+`.zshenv` survive.
+
+The `after_create` hook already resolves Node 24 once (via nvm/fnm/mise, in that
+order) and writes the resolved bin dir to `.symphony-env.sh` at the worktree
+root. **Prepend `. .symphony-env.sh &&` to every shell command that needs Node
+or pnpm.** That keeps each invocation a single short line:
 
 ```bash
-node --version   # expect v24.14.x or newer 24.x
-pnpm --version   # expect 10.28.x or newer 10.x
+. .symphony-env.sh && pnpm jetpack build packages/<pkg>
+. .symphony-env.sh && git commit -m "..."   # husky pre-commit needs Node in PATH
 ```
 
-If Node is wrong or missing, resolve it without mutating the developer environment.
-Try these in order and record which one worked in the workpad `### Notes` as
-`Toolchain: <method> → node v<version>`:
+Do **not** re-source `nvm` / `fnm` / `mise` inline on every command — that's the
+bootstrap the hook already paid for. Verify once, near the start of the run:
+
+```bash
+. .symphony-env.sh && node --version   # expect v24.14.x or newer 24.x
+. .symphony-env.sh && pnpm --version   # expect 10.28.x or newer 10.x
+```
+
+If `.symphony-env.sh` is missing or the version is wrong, the hook failed and you
+need to fall back. Resolve Node without mutating the developer environment, then
+write the resolved bin dir to `.symphony-env.sh` yourself so the rest of the run
+benefits. Try in this order and record which worked in the workpad `### Notes`
+as `Toolchain: <method> → node v<version>`:
 
 1. **nvm**: `\. "$NVM_DIR/nvm.sh" && nvm use` (reads `.nvmrc`).
 2. **fnm**: `eval "$(fnm env --use-on-cd)" && fnm use`.
@@ -58,6 +91,12 @@ Try these in order and record which one worked in the workpad `### Notes` as
    download the Node 24 tarball into `/private/tmp/symphony-node24/` (writable
    under `workspaceWrite`), extract, and `export PATH=/private/tmp/symphony-node24/bin:$PATH`
    for the run.
+
+After whichever method works, persist it for the rest of the run:
+
+```bash
+printf 'export PATH=%q:"$PATH"\n' "$(dirname "$(command -v node)")" > .symphony-env.sh
+```
 
 Do **not** `brew install` (Homebrew writes outside the sandbox and will fail) and
 do **not** edit `~/.zshrc`, `~/.zshenv`, or any other dotfile. The fix is per-run,
@@ -81,6 +120,13 @@ guarantee, not an instruction the agent has to remember:
 
 Use these in preference to raw `gh` whenever they cover the operation. Bodies
 are scanned for secret patterns before submission.
+
+**Note on PR templates:** `github_create_pull_request` does **not** auto-fill from
+`.github/PULL_REQUEST_TEMPLATE.md`. If you use the scoped tool, inline the
+template sections you need into the `body` argument yourself (read the template
+file first). If you want auto-templating + the changelog-entry check, delegate
+to `.agents/skills/jetpack-pr.md` — you still get fork-only safety from the
+git-layer hook (`upstream` push URL is `DISABLE_PUSH`).
 
 **Raw `gh` is still required for the gaps** (no scoped equivalent):
 
@@ -169,9 +215,16 @@ completed work unchecked.
 
 Before the first code edit, record both in the workpad `### Notes` section:
 
-1. **Reproduction signal** — exact command + output, screenshot, or deterministic
-   UI path that demonstrates the current behavior/issue. Without this, the fix
-   target is implicit and the validation is unfalsifiable.
+1. **Reproduction or acceptance signal** — pick one based on issue type:
+   - **Bug fixes / behavior changes**: a **reproduction signal** — exact command
+     plus the failing output, a screenshot, or a deterministic UI path that
+     demonstrates the current broken behavior. Without this, the fix target is
+     implicit and validation is unfalsifiable.
+   - **Pure additions** (new UI element, new mock data, new route): an
+     **acceptance signal** — the exact DOM/CSS selector, screenshot region, or
+     assertion that will prove the new thing is present after the edit.
+     Inventing a "this doesn't exist yet" reproduction is noise; pin the
+     positive check instead.
 2. **Blast-radius analysis** — for each file/function you intend to change:
    list known callers (use `rg`), existing test coverage, and an estimate of
    `narrow` / `moderate` / `wide` with a one-line justification.
@@ -191,15 +244,57 @@ unattended orchestration:
 - **Replace Phase 3 (`pnpm jetpack docker` bring-up + port allocation) with
   `.agents/skills/jetpack-test-jurassic-ninja.md` in `provision-only` flow** for
   the first run on this issue; subsequent runs reuse the JN site via the `rsync`
-  flow. Record the JN domain in the workpad under `### Notes`.
+  flow. Record the JN domain in the workpad under `### Notes`. Do **not** `sleep`
+  while waiting for JN — the skill blocks until the site responds. If you find
+  yourself sleeping, you're polling the wrong signal.
+- **JN rsync recipe** (for re-deploys after a code edit): the plugin must be
+  built (the **plugin**, not just the package), and `pnpm jetpack rsync` is
+  always interactive on macOS even with `--non-interactive` because the
+  `openrsync` symlink warning fires a second prompt. Use this recipe verbatim:
+
+  ```bash
+  . .symphony-env.sh && pnpm jetpack build plugins/<pkg> --deps
+  . .symphony-env.sh && printf 'y\nNah\n' | pnpm jetpack rsync <pkg> \
+    <jn-host>@ssh.atomicsites.net:/srv/htdocs/wp-content/plugins/<pkg> \
+    --password='<jn-password>'
+  ```
+
+  Host is `ssh.atomicsites.net`, not `sftp.wp.com` — only the former is in the
+  network allowlist. The JN password is exposed via the `jurassic-ninja` MCP
+  provider; do not paste it into the workpad or PR body.
+
 - **Phase 4 / Phase 7 (baseline / after screenshots)**: navigate to the relevant
   wp-admin route for `<pkg>` on `https://<jn-domain>`. The Jetpack convention is
   `/wp-admin/admin.php?page=jetpack-<pkg>`; if `<pkg>` registers a different
   submenu slug, find it by inspecting the package's PHP `add_submenu_page`
   registration. Save screenshots under `.work-on/screenshots/`.
+
+  **Take the baseline screenshot before the first edit.** If you've already
+  started editing when you realize you need a baseline, capture it by stashing:
+
+  ```bash
+  git stash push -u -m baseline   # set aside in-progress edits
+  # navigate + screenshot
+  git stash pop                   # restore edits
+  ```
+
+  Then take the "after" screenshot once the edit is rsync'd back to JN.
+
 - **Phase 6 quality gates**: keep local — `pnpm jetpack build <pkg>`, `pnpm jetpack test js <pkg>`
-  (and `composer phpunit` inside the package dir if it has PHP tests). These do
-  not need WP runtime.
+  (and `composer phpunit` inside the package dir **only** if `composer.json`
+  declares a `phpunit` script — see Completion bar below). These do not need WP
+  runtime.
+
+  **Workspace-dep build order:** if you added a new `workspace:*` dependency
+  to `<pkg>/package.json`, you must build the dep before the consumer.
+  Resolution goes through the dep's `dist/` artifacts; without this, the
+  consumer build fails with confusing `jetpack:src` / module-resolution errors:
+
+  ```bash
+  . .symphony-env.sh && pnpm jetpack build js-packages/<dep> --deps
+  . .symphony-env.sh && pnpm jetpack build packages/<pkg>
+  ```
+
 - **Phase 11 cleanup**: do not run `pnpm jetpack docker stop` (no local Docker). Leave the
   JN site reachable for review; it will auto-expire.
 
@@ -339,6 +434,41 @@ When invoking:
    "do not modify Backlog" rule in Step 0.
 4. Stop. Do not guess against a half-spec.
 
+# Commit prerequisites (husky pre-commit hooks)
+
+`git commit` runs husky pre-commit hooks (`npx eslint`, etc.). Two things go
+wrong if you don't set up first — and both have already burned multiple turns
+in previous Symphony runs:
+
+1. **Node must be in `PATH` for the commit shell.** Source `.symphony-env.sh`
+   for the commit just like every other command:
+
+   ```bash
+   . .symphony-env.sh && git add <paths> && git commit -m "<subject>"
+   ```
+
+   Without it, the hook errors out with "command not found: npx" and the
+   commit silently doesn't happen.
+
+2. **Stale workspace `dist/` confuses ESLint disable directives.** If a
+   workspace dep (e.g. `projects/js-packages/charts`) has a leftover `dist/`
+   tree from an earlier build, `import/no-unresolved` will succeed against
+   the dist artifact, which then makes an
+   `eslint-disable-next-line import/no-unresolved` directive look "unused"
+   and fail with `--max-warnings=0`. If you see "unused disable directive"
+   on an import you didn't touch, the fix is **not** to remove the
+   directive — the fix is to clear stale dist trees:
+
+   ```bash
+   rm -rf projects/js-packages/<dep>/dist
+   . .symphony-env.sh && npx eslint --flag v10_config_lookup_from_file \
+     --max-warnings=0 <changed files>
+   ```
+
+   Only after that should you `git commit` again.
+
+Do not use `--no-verify` to bypass the hook. The fix is always to satisfy it.
+
 # Fork-only push and PR (do not skip)
 
 Three layers of defence — use them in this order:
@@ -371,8 +501,6 @@ layer 2; layer 1 is preferred only when you don't need the skill's extras.
 - PR body must include **What changed and why**, **Testing evidence** with
   commands and output snippets, **Screenshots/recordings** for UI changes, and
   any **Follow-ups** filed via the out-of-scope policy above.
-- Ensure the PR carries the `symphony` label so the operator's review filter
-  picks it up.
 
 # Self-review pause (do not skip)
 
@@ -388,18 +516,22 @@ move the issue to `In Review`:
 
 - [ ] Workpad plan / acceptance criteria / validation sections all reflect
       what was actually done (no unchecked completed work).
-- [ ] Reproduction signal captured (Step 2.1).
+- [ ] Reproduction **or acceptance** signal captured (Step 2.1).
 - [ ] Blast-radius analysis recorded (Step 2.2).
 - [ ] Scope check: `git diff --name-only origin/trunk...HEAD` lists only
       `projects/packages/<pkg>/**` and (optionally) `pnpm-lock.yaml`. Paste
       the output into the workpad.
-- [ ] `pnpm jetpack build <pkg>` exits 0 (tail of output in workpad).
-- [ ] `pnpm jetpack test js <pkg>` exits 0 (test counts in workpad); `composer phpunit`
-      exits 0 if the package has PHP tests.
+- [ ] `pnpm jetpack build <pkg>` exits 0 (tail of output in workpad). If a new
+      `workspace:*` dep was added, `pnpm jetpack build js-packages/<dep> --deps`
+      ran first.
+- [ ] `pnpm jetpack test js <pkg>` exits 0 (test counts in workpad).
+- [ ] `composer phpunit` exits 0 **only if** `projects/packages/<pkg>/composer.json`
+      declares a `phpunit` script. Otherwise note `composer phpunit: n/a` in
+      the workpad — do not run it speculatively.
 - [ ] `pnpm changelog` entry exists under `projects/packages/<pkg>/changelog/`.
 - [ ] If visual: before/after screenshots under `.work-on/screenshots/`.
 - [ ] PR is open against `chihsuan/jetpack:trunk` with conventional-commit
-      title, Linear ID in body, `symphony` label, and full body sections.
+      title, Linear ID in body, and full body sections.
       Verify via `github_get_pull_request` (returns `headRefName`/`baseRefName`).
 - [ ] `github_get_pr_checks` shows all checks green (or red items triaged
       per the CI protocol).
