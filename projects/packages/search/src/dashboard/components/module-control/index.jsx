@@ -7,8 +7,10 @@ import { createInterpolateElement } from '@wordpress/element';
 import { sprintf, __ } from '@wordpress/i18n';
 import clsx from 'clsx';
 import { Fragment, useCallback } from 'react';
+import AIAgentAccessControl from 'components/ai-agent-access-control';
 import Card from 'components/card';
 import ReaderChatControl from 'components/reader-chat-control';
+import SearchSuggestionsControl from 'components/search-suggestions-control';
 import InstantSearchUpsellNudge from 'components/upsell-nudge';
 import { STORE_ID } from 'store';
 
@@ -41,6 +43,7 @@ const WIDGETS_EDITOR_URL = 'widgets.php';
  * @param {boolean}  props.isInstantSearchPromotionActive - true if search promotion is active.
  * @param {boolean}  props.isReaderChatAvailable          - true if the Reader Chat setting is available.
  * @param {boolean}  props.isReaderChatEnabled            - true if Reader Chat is enabled.
+ * @param {boolean}  props.isAIAgentAccessAvailable       - true if the AI Agent Access setting is available.
  * @param {boolean}  props.supportsOnlyClassicSearch      - true if site has plan that supports only Classic Search.
  * @param {boolean}  props.supportsSearch                 - true if site has plan that supports either Classic or Instant Search.
  * @param {boolean}  props.supportsInstantSearch          - true if site has plan that supports Instant Search.
@@ -48,6 +51,7 @@ const WIDGETS_EDITOR_URL = 'widgets.php';
  * @param {boolean}  props.isTogglingInstantSearch        - true if toggling Instant Search option.
  * @param {string}   props.readerChatGuidelinesUrl        - Guidelines admin URL, when available.
  * @param {boolean}  props.isSearchSuggestionsEnabled     - true if search suggestions (autocomplete) is enabled.
+ * @param {string}   props.aiAgentAccessGuidelinesUrl     - AI Agent Access guidelines admin URL, when available.
  * @return {import('react').Component} Search settings component.
  */
 export default function SearchModuleControl( {
@@ -61,6 +65,7 @@ export default function SearchModuleControl( {
 	isInstantSearchPromotionActive,
 	isReaderChatAvailable,
 	isReaderChatEnabled,
+	isAIAgentAccessAvailable,
 	supportsOnlyClassicSearch,
 	supportsSearch,
 	supportsInstantSearch,
@@ -68,6 +73,7 @@ export default function SearchModuleControl( {
 	isTogglingInstantSearch,
 	readerChatGuidelinesUrl,
 	isSearchSuggestionsEnabled,
+	aiAgentAccessGuidelinesUrl,
 } ) {
 	const { isUserConnected } = useConnection( {
 		redirectUri: 'admin.php?page=jetpack-search',
@@ -80,6 +86,10 @@ export default function SearchModuleControl( {
 		`admin.php?page=jetpack-search`,
 		isUserConnected || isWpcom
 	);
+	const showAIAgentAccessGuidelinesLink =
+		! isReaderChatAvailable ||
+		! isReaderChatEnabled ||
+		readerChatGuidelinesUrl !== aiAgentAccessGuidelinesUrl;
 
 	const toggleSearchModule = useCallback( () => {
 		if ( isDisabledFromOverLimit ) {
@@ -116,15 +126,6 @@ export default function SearchModuleControl( {
 		updateOptions( newOption );
 		analytics.tracks.recordEvent( 'jetpack_search_instant_toggle', newOption );
 	}, [ supportsInstantSearch, isInstantSearchEnabled, updateOptions, isDisabledFromOverLimit ] );
-
-	const toggleSearchSuggestions = useCallback( () => {
-		if ( isDisabledFromOverLimit ) {
-			return;
-		}
-		const newOption = { search_suggestions_enabled: ! isSearchSuggestionsEnabled };
-		updateOptions( newOption );
-		analytics.tracks.recordEvent( 'jetpack_search_suggestions_toggle', newOption );
-	}, [ isSearchSuggestionsEnabled, updateOptions, isDisabledFromOverLimit ] );
 
 	return (
 		<div
@@ -170,15 +171,20 @@ export default function SearchModuleControl( {
 						updateOptions={ updateOptions }
 					/>
 
-					{ supportsInstantSearch && isInstantSearchEnabled && (
-						<SearchSuggestionsToggle
-							isSearchSuggestionsEnabled={ isSearchSuggestionsEnabled }
-							isInstantSearchEnabled={ isInstantSearchEnabled }
-							isSavingEitherOption={ isSavingEitherOption }
-							isDisabledFromOverLimit={ isDisabledFromOverLimit }
-							toggleSearchSuggestions={ toggleSearchSuggestions }
-						/>
-					) }
+					<AIAgentAccessControl
+						guidelinesUrl={ aiAgentAccessGuidelinesUrl }
+						isAvailable={ isAIAgentAccessAvailable }
+						showGuidelinesLink={ showAIAgentAccessGuidelinesLink }
+					/>
+
+					<SearchSuggestionsControl
+						isEnabled={ isSearchSuggestionsEnabled }
+						isInstantSearchEnabled={ isInstantSearchEnabled }
+						supportsInstantSearch={ supportsInstantSearch }
+						isSaving={ isSavingEitherOption }
+						isDisabledFromOverLimit={ isDisabledFromOverLimit }
+						updateOptions={ updateOptions }
+					/>
 				</div>
 			</Card>
 		</div>
@@ -234,7 +240,7 @@ const InstantSearchToggle = ( {
 				/>
 			</div>
 			<div className="jp-search-dashboard-row">
-				<div className="jp-form-search-settings-group__toggle-description lg-col-span-7 md-col-span-5 sm-col-span-4">
+				<div className="jp-form-search-settings-group__toggle-description lg-col-span-12 md-col-span-8 sm-col-span-4">
 					{ supportsInstantSearch && (
 						<Fragment>
 							<p className="jp-form-search-settings-group__toggle-explanation">
@@ -324,45 +330,9 @@ const SearchToggle = ( {
 				</div>
 			) }
 			<div className="jp-search-dashboard-row">
-				<div className="jp-form-search-settings-group__toggle-description lg-col-span-7 md-col-span-5 sm-col-span-4">
+				<div className="jp-form-search-settings-group__toggle-description lg-col-span-12 md-col-span-8 sm-col-span-4">
 					<p className="jp-form-search-settings-group__toggle-explanation">
 						{ SEARCH_DESCRIPTION }
-					</p>
-				</div>
-			</div>
-		</div>
-	);
-};
-
-const SearchSuggestionsToggle = ( {
-	isSearchSuggestionsEnabled,
-	isInstantSearchEnabled,
-	isSavingEitherOption,
-	isDisabledFromOverLimit,
-	toggleSearchSuggestions,
-} ) => {
-	const isToggleDisabled =
-		isSavingEitherOption || ! isInstantSearchEnabled || isDisabledFromOverLimit;
-
-	return (
-		<div className="jp-form-search-settings-group__toggle is-search-suggestions jp-search-dashboard-wrap">
-			<div className="jp-search-dashboard-row">
-				<ToggleControl
-					checked={ !! isSearchSuggestionsEnabled && ! isDisabledFromOverLimit }
-					disabled={ isToggleDisabled }
-					onChange={ toggleSearchSuggestions }
-					className="jp-search-dashboard-toggle lg-col-span-12 md-col-span-8 sm-col-span-4"
-					label={ __( 'Enable search suggestions', 'jetpack-search-pkg' ) }
-					__nextHasNoMarginBottom={ true }
-				/>
-			</div>
-			<div className="jp-search-dashboard-row">
-				<div className="jp-form-search-settings-group__toggle-description lg-col-span-7 md-col-span-5 sm-col-span-4">
-					<p className="jp-form-search-settings-group__toggle-explanation">
-						{ __(
-							'Show autocomplete query suggestions as visitors type, instead of updating search results on every keystroke.',
-							'jetpack-search-pkg'
-						) }
 					</p>
 				</div>
 			</div>

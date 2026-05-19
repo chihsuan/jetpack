@@ -4,6 +4,7 @@ import { useSelect, useDispatch } from '@wordpress/data';
 import { __ } from '@wordpress/i18n';
 import { Stack, Tabs } from '@wordpress/ui';
 import { useState } from 'react';
+import AIAgentAccessControl from 'components/ai-agent-access-control';
 import AiAnswersTab from 'components/ai-answers-tab';
 import ExperienceSelector from 'components/experience-selector';
 import NoticesList from 'components/global-notices';
@@ -12,7 +13,10 @@ import MockedSearch from 'components/mocked-search';
 import ModuleControl from 'components/module-control';
 import ReaderChatControl from 'components/reader-chat-control';
 import RecordMeter from 'components/record-meter';
+import SearchSuggestionsControl from 'components/search-suggestions-control';
+import WooCommerceProductSearchControl from 'components/woocommerce-product-search-control';
 import { STORE_ID } from 'store';
+import { EXPERIENCE } from '../experience-selector/constants';
 import FirstRunSection from './sections/first-run-section';
 import PlanUsageSection from './sections/plan-usage-section';
 import './dashboard-page.scss';
@@ -66,6 +70,12 @@ export default function DashboardPage( { isLoading = false } ) {
 	const siteAdminUrl = useSelect( select => select( STORE_ID ).getSiteAdminUrl() );
 	const readerChatGuidelinesUrl = useSelect( select =>
 		select( STORE_ID ).getReaderChatGuidelinesUrl()
+	);
+	const aiAgentAccessGuidelinesUrl = useSelect( select =>
+		select( STORE_ID ).getAIAgentAccessGuidelinesUrl()
+	);
+	const isAIAgentAccessAvailable = useSelect( select =>
+		select( STORE_ID ).isAIAgentAccessAvailable()
 	);
 	const { hasConnectionError } = useConnectionErrorNotice();
 
@@ -123,6 +133,30 @@ export default function DashboardPage( { isLoading = false } ) {
 	const isSearchSuggestionsEnabled = useSelect( select =>
 		select( STORE_ID ).isSearchSuggestionsEnabled()
 	);
+	const isWooCommerceActive = useSelect( select => select( STORE_ID ).isWooCommerceActive() );
+	const isWooCommerceSearchTemplateOverrideEnabled = useSelect( select =>
+		select( STORE_ID ).isWooCommerceSearchTemplateOverrideEnabled()
+	);
+	const activeExperience = useSelect( select => select( STORE_ID ).getActiveExperience() );
+	const activeThemeStylesheet = useSelect( select =>
+		select( STORE_ID ).getActiveThemeStylesheet()
+	);
+	// Only meaningful for server-rendered templates; Overlay intercepts
+	// client-side so the override would be a no-op there.
+	const showWooCommerceProductSearchControl =
+		isWooCommerceActive &&
+		( activeExperience === EXPERIENCE.EMBEDDED || activeExperience === EXPERIENCE.INLINE );
+	// Site Editor identifies plugin templates as `<stylesheet>//<slug>`;
+	// fall back to the Templates list when the stylesheet is unavailable.
+	const wooProductSearchEditUrl = activeThemeStylesheet
+		? `${ siteAdminUrl }site-editor.php?p=%2Fwp_template%2F${ encodeURIComponent(
+				activeThemeStylesheet
+		  ) }%2F%2Fjetpack-search-product-results&canvas=edit`
+		: `${ siteAdminUrl }site-editor.php?p=%2Ftemplate`;
+	const showAIAgentAccessGuidelinesLink =
+		! isReaderChatAvailable ||
+		! isReaderChatEnabled ||
+		readerChatGuidelinesUrl !== aiAgentAccessGuidelinesUrl;
 
 	// Record Meter data
 	const tierMaximumRecords = useSelect( select => select( STORE_ID ).getTierMaximumRecords() );
@@ -234,13 +268,41 @@ export default function DashboardPage( { isLoading = false } ) {
 												<div className="lg-col-span-12 md-col-span-8 sm-col-span-4">
 													<ExperienceSelector />
 													{ isReaderChatAvailable && (
-														<div className="jp-search-reader-chat-card">
+														<div className="jp-search-settings-card">
 															<ReaderChatControl
 																isAvailable={ isReaderChatAvailable }
 																isEnabled={ isReaderChatEnabled }
 																isSaving={ isSavingEitherOption }
 																guidelinesUrl={ readerChatGuidelinesUrl }
 																updateOptions={ updateOptions }
+															/>
+														</div>
+													) }
+													<AIAgentAccessControl
+														className="jp-search-ai-agent-access-card"
+														guidelinesUrl={ aiAgentAccessGuidelinesUrl }
+														isAvailable={ isAIAgentAccessAvailable }
+														showGuidelinesLink={ showAIAgentAccessGuidelinesLink }
+													/>
+													{ supportsInstantSearch && isInstantSearchEnabled && (
+														<div className="jp-search-settings-card">
+															<SearchSuggestionsControl
+																isEnabled={ isSearchSuggestionsEnabled }
+																isInstantSearchEnabled={ isInstantSearchEnabled }
+																supportsInstantSearch={ supportsInstantSearch }
+																isSaving={ isSavingEitherOption }
+																isDisabledFromOverLimit={ isOverLimit }
+																updateOptions={ updateOptions }
+															/>
+														</div>
+													) }
+													{ showWooCommerceProductSearchControl && (
+														<div className="jp-search-settings-card">
+															<WooCommerceProductSearchControl
+																isEnabled={ isWooCommerceSearchTemplateOverrideEnabled }
+																isSaving={ isSavingEitherOption }
+																updateOptions={ updateOptions }
+																editTemplateUrl={ wooProductSearchEditUrl }
 															/>
 														</div>
 													) }
@@ -254,6 +316,7 @@ export default function DashboardPage( { isLoading = false } ) {
 											domain={ domain }
 											isDisabledFromOverLimit={ isOverLimit }
 											isInstantSearchPromotionActive={ isInstantSearchPromotionActive }
+											isAIAgentAccessAvailable={ isAIAgentAccessAvailable }
 											isReaderChatAvailable={ isReaderChatAvailable }
 											isReaderChatEnabled={ isReaderChatEnabled }
 											supportsOnlyClassicSearch={ supportsOnlyClassicSearch }
@@ -264,6 +327,7 @@ export default function DashboardPage( { isLoading = false } ) {
 											isSavingEitherOption={ isSavingEitherOption }
 											isTogglingModule={ isTogglingModule }
 											isTogglingInstantSearch={ isTogglingInstantSearch }
+											aiAgentAccessGuidelinesUrl={ aiAgentAccessGuidelinesUrl }
 											readerChatGuidelinesUrl={ readerChatGuidelinesUrl }
 											isSearchSuggestionsEnabled={ isSearchSuggestionsEnabled }
 										/>
